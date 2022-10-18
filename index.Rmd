@@ -1,0 +1,715 @@
+---
+title: "Detección de fragmentación de ADN en esperma utilizando técnicas de Deep learning."
+author: "Samuel Hincapié Monsalve"
+date: "20/4/2021"
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# Carga de las librerías necesarias
+library(readxl)
+library(reshape2)
+library(ggplot2)
+library(ggfortify)
+library(ggbiplot)
+library(bmp)
+library(pixmap)
+library(gtools)
+library(randomForest)
+library(caret)
+library(EBImage)
+library(OpenImageR)
+library(tensorflow)
+library(keras)
+library(tfruns)
+```
+
+# Detección de fragmentación de ADN en esperma utilizando técnicas de Deep learning.
+
+La fragmentación de ADN en esperma es un indicador utilizado en el diagnóstico de infertilidad masculina, para detectarla se utiliza un ensayo clínico llamado comet, donde los espermatozoides son ubicados en un gel y se hace pasar por este corriente eléctrica (electroforesis). Luego de aplicar la corriente, se observa si se ha generado una cola de cometa en el espermatozoide, si es así, quiere decir que el ADN de ese espermatozoide está fragmentado.
+
+Existen dos tipos de fragmentación de ADN, sencilla y doble, según si sólo una hebra del ADN está afectada o ambas. Para detectar cada uno de estos tipos de fragmentación, se utiliza un pH específico, alcalino para detectar fragmentación simple y neutro para fragmentación doble.
+
+## Machine Learning
+
+### Exploración de los datos
+
+Para cada tipo de ensayo, se han proporcionado 1000 imágenes, 500 de espermatozoides normales y 500 de espermatozoides alterados. También se ha proporcionado las siguientes variables de cada espermatozoide medidas por un software de análisis de imágenes:
+
+- Longitud de la cabeza
+- Longitud de la cola
+- Intensidad de la cabeza
+- Intensidad de la cola
+- Momento de la cola
+- Área total
+- Nivel de Gris Medio
+- Intensidad total
+- Ancho
+- Migración de la cola
+
+Con estas variables puede entrenarse un modelo de machine learning para clasificar los espermatozoides según su estado.
+
+#### Comet Alcalino
+
+Se importan los datos de los espermatozoides normales.
+
+```{r, message=FALSE}
+# las imágenes y los archivos de excel está separados por grupos de 100
+# Se lee cada archivo creando un único data frame
+CA_Normal <- read_excel("./CA - NORMALES/CA - NORMALES 1/CA - NORMALES 1.xlsx")
+CA_Normal <- rbind(CA_Normal, read_excel("./CA - NORMALES/CA - NORMALES 2/CA - NORMALES 2.xlsx"))
+CA_Normal <- rbind(CA_Normal, read_excel("./CA - NORMALES/CA - NORMALES 3/CA - NORMALES 3.xlsx"))
+CA_Normal <- rbind(CA_Normal, read_excel("./CA - NORMALES/CA - NORMALES 4/CA - NORMALES 4.xlsx"))
+CA_Normal <- rbind(CA_Normal, read_excel("./CA - NORMALES/CA - NORMALES 5/CA - NORMALES 5.xlsx"))
+# Se conservan las columnas de interés
+CA_Normal <- data.frame(CA_Normal[1:9], CA_Normal[21])
+# Se indica el estado de los espermatozoides
+CA_Normal$State[1:nrow(CA_Normal)] = "Normal"
+# Se nombran las filas
+row.names(CA_Normal)<-sprintf("N%s", seq(1:nrow(CA_Normal)))
+```
+
+Se importan los datos de los espermatozoides alterados.
+
+```{r, message=FALSE}
+CA_Altered <- read_excel("./CA - ALTERADOS/CA - ALTERADOS 1/CA - ALTERADOS 1.xlsx")
+CA_Altered <- rbind(CA_Altered, read_excel("./CA - ALTERADOS/CA - ALTERADOS 2/CA - ALTERADOS 2.xlsx"))
+CA_Altered <- rbind(CA_Altered, read_excel("./CA - ALTERADOS/CA - ALTERADOS 3/CA - ALTERADOS 3.xlsx"))
+CA_Altered <- rbind(CA_Altered, read_excel("./CA - ALTERADOS/CA - ALTERADOS 4/CA - ALTERADOS 4.xlsx"))
+CA_Altered <- rbind(CA_Altered, read_excel("./CA - ALTERADOS/CA - ALTERADOS 5/CA - ALTERADOS 5.xlsx"))
+CA_Altered <- data.frame(CA_Altered[1:9], CA_Altered[21])
+CA_Altered$State[1:nrow(CA_Altered)] = "Alterado"
+row.names(CA_Altered)<-sprintf("A%s", seq(1:nrow(CA_Altered)))
+```
+
+Se juntan los datos en una sola estructura.
+
+```{r}
+# Se unen ambos dataframes
+CA <- rbind(CA_Normal,CA_Altered)
+# La variable estado se convierte a factor
+CA$State <- factor(CA$State)
+```
+
+Se explora gráficamente las diferentes variables para cada estado.
+
+```{r}
+# Se trasnforma el data frame de wide a long
+CA_Long <- melt(CA, id = "State")
+# se grafica cada variable en un gráfico de caja para cada estado
+ggplot(CA_Long, aes(x=variable, y=value, color=State)) + geom_boxplot() + facet_wrap(~variable, scale = "free") + theme_classic()
+```
+
+Gráficamente se puede observar que las variables qu más se diferencian entre las clases son la longitud de la cabeza, la intensidad de la cabeza, la intensidad de la cola, el nivel de gris medio, intensidad total y la migración de la cola.
+
+Se realiza un análisis de componentes principales para determinar si hay diferencias entre las clases:
+
+```{r, warning=FALSE}
+# Análisis de componentes principales
+CA_PCA <- prcomp(CA[1:10], center = TRUE, scale. = TRUE)
+# Resumen
+summary(CA_PCA)
+# Gráfico de las dos primeras componentes principales
+autoplot(CA_PCA, data = CA, colour = 'State', main = "PCA Comet Alcalino") +
+  theme_classic()
+# biplot
+ggbiplot(CA_PCA, obs.scale = 1, var.scale = 1, groups = CA$State, main = "PCA Comet Alcalino")+
+  theme_classic() + xlim(-6,11)
+```
+
+La primera componente es responsable del 51.2% de la variación y la segunda del,36.5% se observa que los espermatozoides alterados tienden a estar más a la derecha y los normales a la izquierda. En el biplot se observa que las variables que más afectan a la componente principal son la intensidad, el momento, la migración y la longitud de la cola y la intensidad de la cabeza, y las que más afectan a la segunda componente son el nivel de gris medio, la longitud de la cabeza, la intensidad total, el área total y el ancho.
+
+#### Comet Neutro
+
+Se importan los datos de los espermatozoides normales.
+
+```{r, message=FALSE}
+CN_Normal <- read_excel("./CN - NORMALES/CN - NORMALES 1/CN - NORMALES 1.xlsx")
+CN_Normal <- rbind(CN_Normal, read_excel("./CN - NORMALES/CN - NORMALES 2/CN - NORMALES 2.xlsx"))
+CN_Normal <- rbind(CN_Normal, read_excel("./CN - NORMALES/CN - NORMALES 3/CN - NORMALES 3.xlsx"))
+CN_Normal <- rbind(CN_Normal, read_excel("./CN - NORMALES/CN - NORMALES 4/CN - NORMALES 4.xlsx"))
+CN_Normal <- rbind(CN_Normal, read_excel("./CN - NORMALES/CN - NORMALES 5/CN - NORMALES 5.xlsx"))
+CN_Normal <- data.frame(CN_Normal[1:9], CN_Normal[21])
+CN_Normal$State[1:nrow(CN_Normal)] = "Normal"
+row.names(CN_Normal)<-sprintf("N%s", seq(1:nrow(CN_Normal)))
+```
+
+Se importan los datos de los espermatozoides alterados.
+
+```{r, message=FALSE}
+CN_Altered <- read_excel("./CN - ALTERADOS/CN - ALTERADOS 1/CN - ALTERADOS 1.xlsx")
+CN_Altered <- rbind(CN_Altered, read_excel("./CN - ALTERADOS/CN - ALTERADOS 2/CN - ALTERADOS 2.xlsx"))
+CN_Altered <- rbind(CN_Altered, read_excel("./CN - ALTERADOS/CN - ALTERADOS 3/CN - ALTERADOS 3.xlsx"))
+CN_Altered <- rbind(CN_Altered, read_excel("./CN - ALTERADOS/CN - ALTERADOS 4/CN - ALTERADOS 4.xlsx"))
+CN_Altered <- rbind(CN_Altered, read_excel("./CN - ALTERADOS/CN - ALTERADOS 5/CN - ALTERADOS 5.xlsx"))
+CN_Altered <- data.frame(CN_Altered[1:9], CN_Altered[21])
+CN_Altered$State[1:nrow(CN_Altered)] = "Alterado"
+row.names(CN_Altered)<-sprintf("A%s", seq(1:nrow(CN_Altered)))
+```
+
+Se importan los datos de espermatozoides degradados.
+
+```{r, message=FALSE}
+CN_Degraded <- read_excel("./CN - DEGRADADOS/CN - DEGRADADOS 1/CN - DEGRADADOS 1.xlsx")
+CN_Degraded <- rbind(CN_Degraded, read_excel("./CN - DEGRADADOS/CN - DEGRADADOS 2/CN - DEGRADADOS 2.xlsx"))
+CN_Degraded <- data.frame(CN_Degraded[1:9], CN_Degraded[21])
+CN_Degraded$State[1:nrow(CN_Degraded)] = "Degradado"
+row.names(CN_Degraded)<-sprintf("D%s", seq(1:nrow(CN_Degraded)))
+```
+
+Se juntan los datos en una sola estructura.
+
+```{r}
+CN <- rbind(CN_Normal,CN_Altered,CN_Degraded)
+CN$State <- factor(CN$State)
+```
+
+Se explora gráficamente las diferentes variables para cada estado.
+
+```{r}
+# Se trasnforma el data frame de wide a long
+CN_Long <- melt(CN, id = "State")
+# se grafica cada variable en un gráfico de caja para cada estado
+ggplot(CN_Long, aes(x=variable, y=value, color=State)) + geom_boxplot() + facet_wrap(~variable, scale = "free") + theme_classic()
+```
+
+Gráficamente, todas las variables son diferentes para los estados normal y alterado exceptuando la longitud de la cabeza, que es igual para ambos. Los espermatozoides degradados se diferencian mucho de los demás.
+
+Se realiza el análisis de componentes principales:
+
+```{r, warning=FALSE}
+CN_PCA <- prcomp(CN[1:10], center = TRUE, scale. = TRUE)
+summary(CN_PCA)
+autoplot(CN_PCA, data = CN, colour = 'State', main = "PCA Comet Neutro")+
+  theme_classic()
+ggbiplot(CN_PCA, data = CN, obs.scale = 1, var.scale = 1, groups = CN$State, main = "PCA Comet Neutro")+
+  theme_classic() + xlim(-6,15)
+```
+
+La primer componente principal es responsable del 68.93% de la variación, y la segunda del 17.91%. Se observa que los espermatozoides normales tienden a estar a la derecha y los afectados a la izquierda, si hay una agrupación por estado. Las variables que más afectan a la primer componente son la intensidad, el momento, la migración y la longitud de la cola, el área total y la intensidad de la cabeza, y las que más afectan a la segunda son la longitud de la cabeza, la intensidad total, el nivel de gris medio y el ancho.
+
+### Random Forest
+
+Para ajustar los modelos, primero se separan el 67% de los datos para entrenarlos y 33% para probarlos. Se utilizará el algoritmo random forest con mil árboles para la clasificación y se evaluará el desempeño de los modelos con la presición y la matriz de confusión.
+
+#### Comet Alcalino
+
+```{r}
+set.seed(12345)
+# se determina el tamaño de los datos de entrenamiento
+train_size <- floor((2/3)*nrow(CA))
+# se determinan los índices que corresponden a los datos de entrenamiento
+index <- sample(seq_len(nrow(CA)), size = train_size)
+# Se extraen los datos de entrenamiento
+CA_Train <- CA[index,]
+# Se extraen los datos de prueba
+CA_Test <- CA[-index,]
+# Se ajusta el modelo
+CA_RF <- randomForest(State~., data = CA_Train, ntree = 100)
+# Se muestra la importancia de cada variable
+CA_RF$importance
+# se realiza la predicción con los datos de prueba
+CA_Pred_RF <- predict(CA_RF, CA_Test)
+# se calcula la matriz de confusión
+confusionMatrix(CA_Pred_RF, CA_Test$State, positive = "Alterado")
+# se guarda el modelo
+CA_RF <- randomForest(State~., data = CA, ntree = 100)
+saveRDS(CA_RF, "./CA_RF.rds")
+```
+
+La presición de la clasificación de los datos de prueba fue de un 96.41%, con 6 falsos positivos y 6 falsos negativos.
+
+#### Comet Neutro
+
+```{r}
+set.seed(12345)
+# se determina el tamaño de los datos de entrenamiento
+train_size <- floor((2/3)*nrow(CN))
+# se determinan los índices que corresponden a los datos de entrenamiento
+index <- sample(seq_len(nrow(CN)), size = train_size)
+# Se extraen los datos de entrenamiento
+CN_Train <- CN[index,]
+# Se extraen los datos de prueba
+CN_Test <- CN[-index,]
+# Se ajusta el modelo
+CN_RF <- randomForest(State~.-Total.Intensity-Head.Length-Width-Mean.Grey.Level-Head.Intensity, data = CN_Train, ntree = 100)
+# Se muestra la importancia de cada variable
+CN_RF$importance
+# se realiza la predicción con los datos de prueba
+CN_Pred_RF <- predict(CN_RF, CN_Test)
+# se calcula la matriz de confusión
+confusionMatrix(CN_Pred_RF, CN_Test$State, positive = "Alterado")
+
+# Se guarda el modelo
+CN_RF <- randomForest(State~.-Total.Intensity-Head.Length-Width-Mean.Grey.Level-Head.Intensity, data = CN, ntree = 100)
+saveRDS(CN_RF, "./CN_RF.rds")
+```
+
+La presición de la clasificación de los datos de prueba fue de un 92.64%.
+
+## Deep Learning
+
+### selección del ROI
+
+Las imágenes entregadas por el CIMAB son de tipo bmp, por lo que están en escala de gris y sus dimensiones son 966x1296 pixeles. En algunas imágenes se pueden ver varios espermatozoides, pero el de interés será siempre el más cercano al centro de la imagen. Para entrenar adecuadamente el modelo y hacer la clasificación correcta del espermatozoide de interés, se debe separar del resto, para eso se desarrolla una función que cumpla con dicho objetivo.
+
+En rasgos generales, la imagen se binariza con un umbral para que los pixeles con un valor superior a este sean blancas y los inferiores sean negros. Este umbral se calcula para cada imagen como el cuantil 0.85 (porcentaje aproximado que ocupan las partes oscuras de la imagen). Posteriormente se realiza una transformación morfológica para eliminar los elementos más pequeños de la imagen. Luego, se marca cada objeto de la imagen con máscaras, y se encuentra cual máscara corresponde al objeto más cercano al centro, se calcula el centro de ese objeto, y al rededor de ese punto se recorta la imagen original a un rectángulo de dimensión 200x400 pixeles (en estas dimensiones suelen caber todos los espermatozoides aunque tengan una cola my larga).
+
+```{r}
+# Se define la función para recortar las imágenes al rededor del espermatozoide más cercano al centro de la imágen
+# Las entradas de la función son una lista con las imágenes, las dimensiones de la imagen final, y el umbral para detectar los espermatozoides en forma del quantil
+Extract_ROI <- function(m,x=200,y=400, q=0.85){
+  # se crea una lista donde se guardarán las imágenes cortadas
+  cropped_images <- list()
+  # Ciclo para recortar cada imagen en la lista
+  for (i in c(1:length(m))) {
+    # se extrae la imagen i de la lista
+    n <- m[[i]]
+    # creamos una copia binaria de la imagen 
+    binary <- n
+    intensity <- quantile(n,q)
+    binary[binary<intensity]<-0
+    binary[binary>=intensity]<-1
+    # Se eliminan las partículas pequeñas
+    binary_erode <- erode(binary, (makeBrush(21, shape='box')))
+    binary_dilate <- dilate(binary_erode, (makeBrush(21, shape='box')))
+    # Se crea una máscara para cada objeto en la imagen
+    mask <- watershed(distmap(binary_dilate), 2)
+    # Se encuentran las coordenadas de todos los puntos sobre el umbral
+    coords <- which(mask > 0, arr.ind = TRUE)
+    # se define el centro de la imágen
+    center <- c((nrow(n)/2),(ncol(n)/2))
+    # se encuentra el punto de máximo brillo más cercano al centro
+    closest.center <- which.min(colSums((t(coords)-center)^2))
+    # se extraen las coordenadas del punto de mayor brillo más cercano al centro
+    coords.closest.center <- coords[closest.center,]
+    # Se identifica el número del objeto
+    object.id <- mask[coords.closest.center[1],coords.closest.center[2]]
+    # Se identifican las coordenadas de todos los pixeles del objeto
+    coords.object <- which(mask == object.id, arr.ind = TRUE)
+    # se calcula el centro del objeto
+    coords.object.center <- c((min(coords.object[,1])+(max(coords.object[,1])-min(coords.object[,1]))/2),(min(coords.object[,2])+(max(coords.object[,2])-min(coords.object[,2]))/2))
+    # en caso de no encontrar un valor igual o superior al umbral se toma el centro de la imagen
+    if (length(coords)==0) {
+      coords.object.center <- center
+    }
+    # se recorta la imagen
+    l <- n[c((coords.object.center[1]-(x/2)):(coords.object.center[1]+((x/2)-1))),c((coords.object.center[2]-(y/2)):(coords.object.center[2]+(y/2-1)))]
+    # se guarda la imagen recortada en la lista
+    cropped_images[[i]] <- l
+  }
+  # la salida de la función es la lista con las imágenes cortadas
+  return(cropped_images)
+}
+```
+
+#### Comet Alcalino
+
+Se importan las imágenes de espermatozoides normales y se extrae la región de interés para cada una.
+
+```{r}
+# dirección de los directorios con las imágenes
+Path_CA_Normal_1 <- "./CA - NORMALES/CA - NORMALES 1/"
+Path_CA_Normal_2 <- "./CA - NORMALES/CA - NORMALES 2/"
+Path_CA_Normal_3 <- "./CA - NORMALES/CA - NORMALES 3/"
+Path_CA_Normal_4 <- "./CA - NORMALES/CA - NORMALES 4/"
+Path_CA_Normal_5 <- "./CA - NORMALES/CA - NORMALES 5/"
+
+# Se organizan las direcciones en el orden original
+Archivos_CA_Normal_1 <- mixedsort(list.files(path = Path_CA_Normal_1, pattern = ".bmp", full.names = TRUE))
+Archivos_CA_Normal_2 <- mixedsort(list.files(path = Path_CA_Normal_2, pattern = ".bmp", full.names = TRUE))
+Archivos_CA_Normal_3 <- mixedsort(list.files(path = Path_CA_Normal_3, pattern = ".bmp", full.names = TRUE))
+Archivos_CA_Normal_4 <- mixedsort(list.files(path = Path_CA_Normal_4, pattern = ".bmp", full.names = TRUE))
+Archivos_CA_Normal_5 <- mixedsort(list.files(path = Path_CA_Normal_5, pattern = ".bmp", full.names = TRUE))
+
+#Se importan las imágenes
+Imagenes_CA_Normal_1 <- lapply(Archivos_CA_Normal_1, read.bmp)
+Imagenes_CA_Normal_2 <- lapply(Archivos_CA_Normal_2, read.bmp)
+Imagenes_CA_Normal_3 <- lapply(Archivos_CA_Normal_3, read.bmp)
+Imagenes_CA_Normal_4 <- lapply(Archivos_CA_Normal_4, read.bmp)
+Imagenes_CA_Normal_5 <- lapply(Archivos_CA_Normal_5, read.bmp)
+
+# Se agrupan las imágenes en un solo arreglo
+Imagenes_CA_Normal <- c(Imagenes_CA_Normal_1,Imagenes_CA_Normal_2,Imagenes_CA_Normal_3, Imagenes_CA_Normal_4, Imagenes_CA_Normal_5)
+
+# Se eliminan los datos innecesarios
+rm(Imagenes_CA_Normal_1,Imagenes_CA_Normal_2,Imagenes_CA_Normal_3,Imagenes_CA_Normal_4,Imagenes_CA_Normal_5)
+
+# se extrae la región de interés de todas las imágenes
+ROI_CA_Normal <- Extract_ROI(Imagenes_CA_Normal)
+
+#dir.create("./CA - NORMALES/ROI/")
+
+#for (i in 1:length(ROI_CA_Normal)) {
+#  file_name <- paste("./CA - NORMALES/ROI/",i, ".png")
+#  bmp(file = file_name, bg = "black", width = 400, height = 200, units = "px")
+#  par(mar=rep(0, 4), xpd = NA)
+#  par(oma=c(0,0,0,0))
+#  plot(pixmapGrey(ROI_CA_Normal[[i]], cellres = 1))
+#  dev.off()
+#}
+```
+
+Se importan las imágenes de espermatozoides alterados y se extrae la región de interés.
+
+```{r, warning=FALSE}
+Path_CA_Altered_1 <- "./CA - ALTERADOS/CA - ALTERADOS 1/"
+Path_CA_Altered_2 <- "./CA - ALTERADOS/CA - ALTERADOS 2/"
+Path_CA_Altered_3 <- "./CA - ALTERADOS/CA - ALTERADOS 3/"
+Path_CA_Altered_4 <- "./CA - ALTERADOS/CA - ALTERADOS 4/"
+Path_CA_Altered_5 <- "./CA - ALTERADOS/CA - ALTERADOS 5/"
+
+Archivos_CA_Altered_1 <- mixedsort(list.files(path = Path_CA_Altered_1, pattern = ".bmp", full.names = TRUE))
+Archivos_CA_Altered_2 <- mixedsort(list.files(path = Path_CA_Altered_2, pattern = ".bmp", full.names = TRUE))
+Archivos_CA_Altered_3 <- mixedsort(list.files(path = Path_CA_Altered_3, pattern = ".bmp", full.names = TRUE))
+Archivos_CA_Altered_4 <- mixedsort(list.files(path = Path_CA_Altered_4, pattern = ".bmp", full.names = TRUE))
+Archivos_CA_Altered_5 <- mixedsort(list.files(path = Path_CA_Altered_5, pattern = ".bmp", full.names = TRUE))
+
+Imagenes_CA_Altered_1 <- lapply(Archivos_CA_Altered_1, read.bmp)
+Imagenes_CA_Altered_2 <- lapply(Archivos_CA_Altered_2, read.bmp)
+Imagenes_CA_Altered_3 <- lapply(Archivos_CA_Altered_3, read.bmp)
+Imagenes_CA_Altered_4 <- lapply(Archivos_CA_Altered_4, read.bmp)
+Imagenes_CA_Altered_5 <- lapply(Archivos_CA_Altered_5, read.bmp)
+
+Imagenes_CA_Altered <- c(Imagenes_CA_Altered_1,Imagenes_CA_Altered_2,Imagenes_CA_Altered_3, Imagenes_CA_Altered_4, Imagenes_CA_Altered_5)
+
+rm(Imagenes_CA_Altered_1,Imagenes_CA_Altered_2,Imagenes_CA_Altered_3,Imagenes_CA_Altered_4,Imagenes_CA_Altered_5)
+
+ROI_CA_Altered <- Extract_ROI(Imagenes_CA_Altered)
+
+#dir.create("./CA - ALTERADOS/ROI/")
+
+#for (i in 1:length(ROI_CA_Altered)) {
+#  file_name <- paste("./CA - ALTERADOS/ROI/",i, ".png")
+#  bmp(file = file_name, bg = "black", width = 400, height = 200, units = "px")
+#  par(mar=rep(0, 4), xpd = NA)
+#  par(oma=c(0,0,0,0))
+#  plot(pixmapGrey(ROI_CA_Altered[[i]], cellres = 1))
+#  dev.off()
+#}
+```
+
+#### Comet Neutro
+
+Se importan las imágenes de espermatozoides normales y se extrae la región de interés para cada una.
+
+```{r}
+Path_CN_Normal_1 <- "./CN - NORMALES/CN - NORMALES 1/"
+Path_CN_Normal_2 <- "./CN - NORMALES/CN - NORMALES 2/"
+Path_CN_Normal_3 <- "./CN - NORMALES/CN - NORMALES 3/"
+Path_CN_Normal_4 <- "./CN - NORMALES/CN - NORMALES 4/"
+Path_CN_Normal_5 <- "./CN - NORMALES/CN - NORMALES 5/"
+
+Archivos_CN_Normal_1 <- mixedsort(list.files(path = Path_CN_Normal_1, pattern = ".bmp", full.names = TRUE))
+Archivos_CN_Normal_2 <- mixedsort(list.files(path = Path_CN_Normal_2, pattern = ".bmp", full.names = TRUE))
+Archivos_CN_Normal_3 <- mixedsort(list.files(path = Path_CN_Normal_3, pattern = ".bmp", full.names = TRUE))
+Archivos_CN_Normal_4 <- mixedsort(list.files(path = Path_CN_Normal_4, pattern = ".bmp", full.names = TRUE))
+Archivos_CN_Normal_5 <- mixedsort(list.files(path = Path_CN_Normal_5, pattern = ".bmp", full.names = TRUE))
+
+Imagenes_CN_Normal_1 <- lapply(Archivos_CN_Normal_1, read.bmp)
+Imagenes_CN_Normal_2 <- lapply(Archivos_CN_Normal_2, read.bmp)
+Imagenes_CN_Normal_3 <- lapply(Archivos_CN_Normal_3, read.bmp)
+Imagenes_CN_Normal_4 <- lapply(Archivos_CN_Normal_4, read.bmp)
+Imagenes_CN_Normal_5 <- lapply(Archivos_CN_Normal_5, read.bmp)
+
+Imagenes_CN_Normal <- c(Imagenes_CN_Normal_1,Imagenes_CN_Normal_2,Imagenes_CN_Normal_3, Imagenes_CN_Normal_4, Imagenes_CN_Normal_5)
+
+rm(Imagenes_CN_Normal_1,Imagenes_CN_Normal_2,Imagenes_CN_Normal_3,Imagenes_CN_Normal_4,Imagenes_CN_Normal_5)
+
+ROI_CN_Normal <- Extract_ROI(Imagenes_CN_Normal)
+
+#dir.create("./CN - NORMALES/ROI/")
+
+#for (i in 1:length(ROI_CN_Normal)) {
+#  file_name <- paste("./CN - NORMALES/ROI/",i, ".png")
+#  bmp(file = file_name, bg = "black", width = ncol(ROI_CN_Normal[[i]]), height = nrow(ROI_CN_Normal[[i]]), units = "px")
+#  par(mar=rep(0, 4), xpd = NA)
+#  par(oma=c(0,0,0,0))
+#  plot(pixmapGrey(ROI_CN_Normal[[i]], cellres = 1))
+#  dev.off()
+#}
+```
+
+Se importan las imágenes de espermatozoides alterados y se extrae la región de interés para cada una.
+
+```{r}
+Path_CN_Altered_1 <- "./CN - ALTERADOS/CN - ALTERADOS 1/"
+Path_CN_Altered_2 <- "./CN - ALTERADOS/CN - ALTERADOS 2/"
+Path_CN_Altered_3 <- "./CN - ALTERADOS/CN - ALTERADOS 3/"
+Path_CN_Altered_4 <- "./CN - ALTERADOS/CN - ALTERADOS 4/"
+Path_CN_Altered_5 <- "./CN - ALTERADOS/CN - ALTERADOS 5/"
+
+Archivos_CN_Altered_1 <- mixedsort(list.files(path = Path_CN_Altered_1, pattern = ".bmp", full.names = TRUE))
+Archivos_CN_Altered_2 <- mixedsort(list.files(path = Path_CN_Altered_2, pattern = ".bmp", full.names = TRUE))
+Archivos_CN_Altered_3 <- mixedsort(list.files(path = Path_CN_Altered_3, pattern = ".bmp", full.names = TRUE))
+Archivos_CN_Altered_4 <- mixedsort(list.files(path = Path_CN_Altered_4, pattern = ".bmp", full.names = TRUE))
+Archivos_CN_Altered_5 <- mixedsort(list.files(path = Path_CN_Altered_5, pattern = ".bmp", full.names = TRUE))
+
+Imagenes_CN_Altered_1 <- lapply(Archivos_CN_Altered_1, read.bmp)
+Imagenes_CN_Altered_2 <- lapply(Archivos_CN_Altered_2, read.bmp)
+Imagenes_CN_Altered_3 <- lapply(Archivos_CN_Altered_3, read.bmp)
+Imagenes_CN_Altered_4 <- lapply(Archivos_CN_Altered_4, read.bmp)
+Imagenes_CN_Altered_5 <- lapply(Archivos_CN_Altered_5, read.bmp)
+
+Imagenes_CN_Altered <- c(Imagenes_CN_Altered_1,Imagenes_CN_Altered_2,Imagenes_CN_Altered_3, Imagenes_CN_Altered_4, Imagenes_CN_Altered_5)
+
+rm(Imagenes_CN_Altered_1,Imagenes_CN_Altered_2,Imagenes_CN_Altered_3,Imagenes_CN_Altered_4,Imagenes_CN_Altered_5)
+
+ROI_CN_Altered <- Extract_ROI(Imagenes_CN_Altered)
+
+#dir.create("./CN - ALTERADOS/ROI/")
+
+#for (i in 1:length(ROI_CN_Altered)) {
+#  file_name <- paste("./CN - ALTERADOS/ROI/",i, ".png")
+#  bmp(file = file_name, bg = "black", width = ncol(ROI_CN_Altered[[i]]), height = nrow(ROI_CN_Altered[[i]]), units = "px")
+#  par(mar=rep(0, 4), xpd = NA)
+#  par(oma=c(0,0,0,0))
+#  plot(pixmapGrey(ROI_CN_Altered[[i]], cellres = 1))
+#  dev.off()
+#}
+```
+
+Se importan las imágenes de espermatozoides degradados y se extrae la región de interés para cada una.
+
+```{r}
+Path_CN_Degraded_1 <- "./CN - DEGRADADOS/CN - DEGRADADOS 1/"
+Path_CN_Degraded_2 <- "./CN - DEGRADADOS/CN - DEGRADADOS 2/"
+
+Archivos_CN_Degraded_1 <- mixedsort(list.files(path = Path_CN_Degraded_1, pattern = ".bmp", full.names = TRUE))
+Archivos_CN_Degraded_2 <- mixedsort(list.files(path = Path_CN_Degraded_2, pattern = ".bmp", full.names = TRUE))
+
+Imagenes_CN_Degraded_1 <- lapply(Archivos_CN_Degraded_1, read.bmp)
+Imagenes_CN_Degraded_2 <- lapply(Archivos_CN_Degraded_2, read.bmp)
+
+Imagenes_CN_Degraded<- c(Imagenes_CN_Degraded_1,Imagenes_CN_Degraded_2)
+
+rm(Imagenes_CN_Degraded_1,Imagenes_CN_Degraded_2)
+
+ROI_CN_Degraded <- Extract_ROI(Imagenes_CN_Degraded)
+
+#dir.create("./CN - DEGRADADOS/ROI/")
+
+#for (i in 1:length(ROI_CN_Degraded)) {
+#  file_name <- paste("./CN - DEGRADADOS/ROI/",i, ".png")
+#  bmp(file = file_name, bg = "black", width = ncol(ROI_CN_Degraded[[i]]), height = nrow(ROI_CN_Degraded[[i]]), units = "px")
+#  par(mar=rep(0, 4), xpd = NA)
+#  par(oma=c(0,0,0,0))
+#  plot(pixmapGrey(ROI_CN_Degraded[[i]], cellres = 1))
+#  dev.off()
+#}
+```
+
+
+### Preparación de los datos
+
+Las imágenes deben tener un formato específico para poder ser utilizadas en la red neuronal convolucional, por le que se ajusatan para cumplir con estos parámetros.
+
+#### Comet Alcalino
+
+```{r}
+# Se unen las dos listas de imágenes de espermatozoides normales y alterados
+x_CA <- c(ROI_CA_Normal,ROI_CA_Altered)
+# Se cambia la lista a un vector de 4 dimensiones (capa, altura, ancho, imagen)
+x_CA <- array(unlist(x_CA), dim=c(1,nrow(ROI_CA_Normal[[1]]),ncol(ROI_CA_Normal[[1]]),length(x_CA)))
+# se organizan los índices de las dimensiones
+x_CA <- aperm(x_CA,c(4,2,3,1))
+# se crea un vector con la clasificación real
+y_CA <- c(rep(0,length(ROI_CA_Normal)), rep(1,length(ROI_CA_Altered)))
+```
+
+Separación de las imágenes en set de entrenamiento y set de prueba.
+
+```{r}
+set.seed(12345)
+# Se determina el tamaño del set de entrenamiento
+train_size <- floor((2/3)*dim(x_CA)[1])
+# Se determinan los índices de los datos de entrenamiento
+index <- sample(seq_len(dim(x_CA)[1]), size = train_size)
+# se extraen los datos de entrenamiento
+x_CA_train <- x_CA[index,,,]
+# Se extraen los datos de prueba
+x_CA_test <- x_CA[-index,,,]
+# se extraen las clasificaciones de los datos de entrenamiento
+y_CA_train <- y_CA[index]
+# se extraen las clasificaciones de los datos de entrenamiento
+y_CA_test <- y_CA[-index]
+# se normalizan las imágenes de entrenamiento
+x_CA_train <- x_CA_train / 255
+# se normalizan las imágenes de prueba
+x_CA_test <- x_CA_test / 255
+# se añade el índice de la capa tras perderse por la extracción
+dim(x_CA_train)<-c(dim(x_CA_train),1)
+dim(x_CA_test)<-c(dim(x_CA_test),1)
+# se añade la dimensión a los vectores con las clasificaciones
+dim(y_CA_train)<- length(y_CA_train)
+dim(y_CA_test)<- length(y_CA_test)
+```
+
+#### Comet Neutro
+
+```{r}
+# Se unen las dos listas de imágenes de espermatozoides normales y alterados
+x_CN <- c(ROI_CN_Normal,ROI_CN_Altered, ROI_CN_Degraded)
+# Se Cambia la lista a un vector de 4 dimensiones (capa, altura, ancho, imagen)
+x_CN <- array(unlist(x_CN), dim=c(1,nrow(ROI_CN_Normal[[1]]),ncol(ROI_CN_Normal[[1]]),length(x_CN)))
+# se organizan los índices de las dimensiones
+x_CN <- aperm(x_CN,c(4,2,3,1))
+# se crea un vector con la clasificación real
+y_CN <- c(rep(0,length(ROI_CN_Normal)), rep(1,length(ROI_CN_Altered)), rep(2,length(ROI_CN_Degraded)))
+```
+
+Separación de las imágenes en set de entrenamiento y set de prueba.
+
+```{r}
+set.seed(12345)
+# Se determina el tamaño del set de entrenamiento
+train_size <- floor((2/3)*dim(x_CN)[1])
+# Se determinan los índices de los datos de entrenamiento
+index <- sample(seq_len(dim(x_CN)[1]), size = train_size)
+# se extraen los datos de entrenamiento
+x_CN_train <- x_CN[index,,,]
+# Se extraen los datos de prueba
+x_CN_test <- x_CN[-index,,,]
+# se extraen las clasificaciones de los datos de entrenamiento
+y_CN_train <- y_CN[index]
+# se extraen las clasificaciones de los datos de entrenamiento
+y_CN_test <- y_CN[-index]
+# se normalizan las imágenes de entrenamiento
+x_CN_train <- x_CN_train / 255
+# se normalizan las imágenes de prueba
+x_CN_test <- x_CN_test / 255
+# se añade el índice de la capa tras perderse por la extracción
+dim(x_CN_train)<-c(dim(x_CN_train),1)
+dim(x_CN_test)<-c(dim(x_CN_test),1)
+# se añade la dimensión a los vectores con las clasificaciones
+dim(y_CN_train)<- length(y_CN_train)
+dim(y_CN_test)<- length(y_CN_test)
+```
+
+### Entrenamiento del modelo
+
+#### Comet Alcalino
+
+Se determinan los parámetros de la red neuronal.
+
+```{r}
+# Es un modelo secuencial
+model_CA <- keras_model_sequential()
+model_CA%>%
+  # capa convolucional con 32 filtros
+  layer_conv_2d(filters = 32, kernel_size = c(3,3), activation = 'relu', input_shape = c(200, 400, 1)) %>%
+  # capa de pooling
+  layer_max_pooling_2d(pool_size = c(2,2)) %>%
+  #capa convolucional de 64 filtros
+  layer_conv_2d(filters = 64, kernel_size = c(3,3), activation = 'relu') %>%
+  # capa de pooling
+  layer_max_pooling_2d(pool_size = c(2,2)) %>%
+  # capa de aplanamiento
+  layer_flatten() %>%
+  # capa de clasificación con 128 neuronas
+  layer_dense(units = 128, activation = 'relu') %>%
+  # capa de clasificación con 2 neuronas
+  layer_dense(units = 2, activation = 'softmax')
+```
+
+Compilación del modelo
+
+```{r}
+# se compila el modelo
+model_CA %>% compile(
+  optimizer = 'adam', 
+  loss = 'sparse_categorical_crossentropy',
+  metrics = c('accuracy')
+)
+```
+
+Entrenamiento del modelo
+
+```{r}
+# se entrena el modelo
+history_CA <- model_CA %>% fit(x_CA_train, y_CA_train, validation_data=list(x_CA_test, y_CA_test), epochs = 30, verbose = 2, batch_size = 128, callbacks = callback_early_stopping(monitor = "val_loss", patience = 10, restore_best_weights = TRUE))
+# Se grafica el historial de entrenamiento
+plot(history_CA) + theme_classic()
+# se guarda el modelo
+model_CA %>% save_model_tf("model_CA")
+```
+
+#### Comet Neutro
+
+Se determinan los parámetros de la red neuronal.
+
+```{r}
+# Es un modelo secuencial
+model_CN <- keras_model_sequential()
+model_CN%>%
+  # capa convolucional con 32 filtros
+  layer_conv_2d(filters = 32, kernel_size = c(3,3), activation = 'relu', input_shape = c(200, 400, 1)) %>%
+  # capa de pooling
+  layer_max_pooling_2d(pool_size = c(2,2)) %>%
+  #capa convolucional con 64 filtros
+  layer_conv_2d(filters = 64, kernel_size = c(3,3), activation = 'relu') %>%
+  # capa de pooling
+  layer_max_pooling_2d(pool_size = c(2,2)) %>%
+  # capa de aplanamiento
+  layer_flatten() %>%
+  # capa de clasificación con 128 neuronas
+  layer_dense(units = 128, activation = 'relu') %>%
+  # capa de clasificación con 3 neuronas
+  layer_dense(units = 3, activation = 'softmax')
+```
+
+Compilación del modelo.
+
+```{r}
+# se compila el modelo
+model_CN %>% compile(
+  optimizer = 'adam', 
+  loss = 'sparse_categorical_crossentropy',
+  metrics = c('accuracy')
+)
+```
+
+Entrenamiento del modelo.
+
+```{r}
+# se entrena el modelo
+history_CN <- model_CN %>% fit(x_CN_train, y_CN_train, validation_data=list(x_CN_test, y_CN_test), epochs = 30, verbose = 2, batch_size = 128, callbacks = callback_early_stopping(monitor = "val_loss", patience = 10, restore_best_weights = TRUE))
+# Se grafica el historial de entrenamiento
+plot(history_CN) + theme_classic()
+# Se guarda el modelo
+model_CN %>% save_model_tf("model_CN")
+```
+
+### Evaluación del desempeño
+
+#### Comet Alcalino
+
+```{r}
+# Se realiza la clasificación de los datos de prueba
+model_CA %>% evaluate(x_CA_test, y_CA_test,verbose = 0)
+CA_pred <- model_CA %>% predict_classes(x_CA_test)
+# Matríz de confusión
+confusionMatrix(factor(CA_pred), factor(y_CA_test), positive = "1")
+```
+
+La presición de la clasificación fue de 96.11%.
+
+#### Comet Neutro
+
+```{r}
+model_CN %>% evaluate(x_CN_test, y_CN_test,verbose = 0)
+CN_pred <- model_CN %>% predict_classes(x_CN_test)
+confusionMatrix(factor(CN_pred), factor(y_CN_test), positive = "1")
+```
+
+La presición de la clasificación fue de 93.73%.
+
+callback_early_stopping() Stop training when a monitored quantity has stopped improving
+callback_learning_rate_scheduler() Learning rate scheduler
